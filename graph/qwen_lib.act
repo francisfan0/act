@@ -1,0 +1,196 @@
+// Qwen3 component processes.
+//
+// Every channel carries a 32-bit artifact token id; tensors stay in the
+// bridge. A compute process calls compute (which may not publish anything)
+// and then commit, and only sends the committed token downstream. Component
+// ids are LAYER * 16 + OP, as listed in config/stage_map.json.
+//
+// actsim keeps running after a failed assert, so the bridge also records every
+// failure and the sink's final check fails if any occurred.
+
+namespace qwen {
+  export function init() : int<32>;
+  export function source_prompt(int<32> request_id) : int<32>;
+  export function source_layer(int<32> layer) : int<32>;
+  export function fork(int<32> token_id; int<32> nconsumers) : int<32>;
+  export function compute1(int<32> cid; int<32> a) : int<32>;
+  export function compute2(int<32> cid; int<32> a; int<32> b) : int<32>;
+  export function commit(int<32> cid; int<32> handle) : int<32>;
+  export function continue_after(int<32> selected_token) : int<32>;
+  export function decode_input(int<32> selected_token) : int<32>;
+  export function finish_layer(int<32> token_id) : int<32>;
+  export function finish_generate(int<32> selected_token) : int<32>;
+}
+
+// Finite input memory: one slot of token references. A sender blocks until
+// the slot is free. Dequeue frees the slot; the tensor stays in the store.
+defproc input_memory(chan?(int<32>) I; chan!(int<32>) O)
+{
+  int<32> t;
+  chp {
+    *[ I?t; O!t ]
+  }
+}
+
+// Explicit fan-out. Both consumers are registered before either receives the token.
+defproc fork2(chan?(int<32>) I; chan!(int<32>) A, B)
+{
+  int<32> t, ok;
+  chp {
+    *[ I?t;
+       ok := qwen::fork(t, 2);
+       assert(ok = 1, "fork registration failed for token ", t);
+       A!t, B!t
+    ]
+  }
+}
+
+template<pint CID>
+defproc stage1(chan?(int<32>) I; chan!(int<32>) O)
+{
+  int<32> t, h, o;
+  chp {
+    *[ I?t;
+       h := qwen::compute1(CID, t);
+       assert(h != 0, "compute failed in component ", CID);
+       o := qwen::commit(CID, h);
+       assert(o != 0, "commit failed in component ", CID);
+       O!o
+    ]
+  }
+}
+
+// Two-operand join. It fires only after both operands have arrived; the bridge
+// rejects the pair unless both carry the same run, request, invocation, and positions.
+template<pint CID>
+defproc stage2(chan?(int<32>) L, R; chan!(int<32>) O)
+{
+  int<32> l, r, h, o;
+  chp {
+    *[ L?l, R?r;
+       h := qwen::compute2(CID, l, r);
+       assert(h != 0, "join compute failed in component ", CID);
+       o := qwen::commit(CID, h);
+       assert(o != 0, "join commit failed in component ", CID);
+       O!o
+    ]
+  }
+}
+
+template<pint CID>
+defproc mem_stage1(chan?(int<32>) I; chan!(int<32>) O)
+{
+  input_memory m;
+  stage1<CID> s;
+  m.I = I;
+  m.O = s.I;
+  s.O = O;
+}
+
+template<pint CID>
+defproc mem_stage2(chan?(int<32>) L, R; chan!(int<32>) O)
+{
+  input_memory ml;
+  input_memory mr;
+  stage2<CID> s;
+  ml.I = L;
+  mr.I = R;
+  ml.O = s.L;
+  mr.O = s.R;
+  s.O = O;
+}
+
+// One transformer block, decomposed into the ten core operations.
+template<pint LAYER>
+defproc block(chan?(int<32>) I; chan!(int<32>) O)
+{
+  fork2 f_in;
+  mem_stage1<LAYER*16+0> input_norm;
+  mem_stage1<LAYER*16+1> qkv_projection;
+  mem_stage1<LAYER*16+2> qk_norm_rope;
+  mem_stage1<LAYER*16+3> cache_update;
+  mem_stage1<LAYER*16+4> attention;
+  mem_stage1<LAYER*16+5> attention_output_projection;
+  mem_stage2<LAYER*16+6> attention_residual_add;
+  fork2 f_mid;
+  mem_stage1<LAYER*16+7> post_attention_norm;
+  mem_stage1<LAYER*16+8> mlp;
+  mem_stage2<LAYER*16+9> mlp_residual_add;
+
+  f_in.I = I;
+  f_in.A = input_norm.I;
+  input_norm.O = qkv_projection.I;
+  qkv_projection.O = qk_norm_rope.I;
+  qk_norm_rope.O = cache_update.I;
+  cache_update.O = attention.I;
+  attention.O = attention_output_projection.I;
+  attention_output_projection.O = attention_residual_add.L;
+  f_in.B = attention_residual_add.R;
+
+  attention_residual_add.O = f_mid.I;
+  f_mid.A = post_attention_norm.I;
+  post_attention_norm.O = mlp.I;
+  mlp.O = mlp_residual_add.L;
+  f_mid.B = mlp_residual_add.R;
+  mlp_residual_add.O = O;
+}
+
+template<pint LAYER>
+defproc layer_source(chan!(int<32>) O)
+{
+  int<32> ok, t;
+  chp {
+    ok := qwen::init();
+    assert(ok = 1, "bridge init failed");
+    t := qwen::source_layer(LAYER);
+    assert(t != 0, "reference layer input missing");
+    O!t
+  }
+}
+
+defproc layer_sink(chan?(int<32>) I)
+{
+  int<32> t, ok;
+  chp {
+    I?t;
+    ok := qwen::finish_layer(t);
+    assert(ok = 1, "layer validation failed");
+    log("layer validation passed")
+  }
+}
+
+// Generation feedback controller for one request.
+// It issues the prompt as the prefill invocation, then receives each selected
+// token. Each one is either sent back as the next single-position decode
+// invocation or, at EOS or the step limit, ends the request. The next decode
+// cannot start before the previous selection arrives, because each token
+// depends on the previous token's logits.
+defproc generation_controller(chan!(int<32>) O; chan?(int<32>) I)
+{
+  int<32> ok, t, s, c;
+  bool running;
+  chp {
+    ok := qwen::init();
+    assert(ok = 1, "bridge init failed");
+    t := qwen::source_prompt(1);
+    assert(t != 0, "prompt source failed");
+    O!t;
+    running+;
+    *[ running ->
+       I?s;
+       c := qwen::continue_after(s);
+       assert(c != 0, "controller decision failed for token ", s);
+       [ c = 1 ->
+           t := qwen::decode_input(s);
+           assert(t != 0, "decode input failed for token ", s);
+           log("decode invocation token ", t);
+           O!t
+       [] c = 2 ->
+           ok := qwen::finish_generate(s);
+           assert(ok = 1, "generation validation failed");
+           log("generation finished");
+           running-
+       ]
+    ]
+  }
+}

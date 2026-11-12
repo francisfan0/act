@@ -1,0 +1,7 @@
+{
+  "slots_per_port": 1,
+  "byte_capacity": null,
+  "dequeue_releases_slot": true,
+  "dequeue_releases_tensor": false,
+  "join_key": ["run_id", "request_id", "invocation_id", "position_start", "sequence_length"]
+}

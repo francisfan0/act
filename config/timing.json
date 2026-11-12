@@ -1,0 +1,4 @@
+{
+  "act_statement_delay": 10,
+  "note": "The default ACT statement delay is a simulation tick used to inspect ordering. It is not a measured hardware time. Host wall time and simulation time are recorded as separate journal fields."
+}

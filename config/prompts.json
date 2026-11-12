@@ -1,0 +1,6 @@
+{
+  "cases": [
+    {"name": "capital", "prompt": "The capital of France is", "decode_steps": 4},
+    {"name": "counting", "prompt": "One, two, three, four,", "decode_steps": 4}
+  ]
+}

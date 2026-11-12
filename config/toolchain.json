@@ -1,0 +1,33 @@
+{
+  "installed_on": "2026-10-31",
+  "act_home": "$HOME/async",
+  "host": "arm64 darwin",
+  "compiler": "Apple clang 17.0.0",
+  "repos": {
+    "act": {
+      "url": "https://github.com/asyncvlsi/act",
+      "revision": "f81f914ef96539033ae7cb9134b28746f0ce597b"
+    },
+    "stdlib": {
+      "url": "https://github.com/asyncvlsi/stdlib",
+      "revision": "1c4f432ba01964f678f6a7e382682b87e37b72e5"
+    },
+    "annotate": {
+      "url": "https://github.com/asyncvlsi/annotate",
+      "revision": "602333a2249126647ea8ce8ff386247eaeaa6137"
+    },
+    "actsim": {
+      "url": "https://github.com/asyncvlsi/actsim",
+      "revision": "938625a9ad0e8e7c58deabf1132fc606b880a0a8"
+    }
+  },
+  "python": {
+    "implementation": "uv virtualenv at .venv",
+    "reason": "conda 24.11.3 on this machine cannot load libarchive.20.dylib, so the libmamba solver does not run",
+    "python": "3.12.9",
+    "torch": "2.10.0",
+    "transformers": "5.0.0",
+    "safetensors": "0.7.0",
+    "numpy": "1.26.4"
+  }
+}

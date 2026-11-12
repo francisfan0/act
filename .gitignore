@@ -1,0 +1,9 @@
+.venv/
+build/
+runs/
+__pycache__/
+*.pyc
+.DS_Store
+*.dylib
+*.so
+.actsim_history

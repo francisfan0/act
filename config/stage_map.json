@@ -1,0 +1,24 @@
+{
+  "component_id": "layer * 16 + op",
+  "token_id_width": 32,
+  "invalid_token_id": 0,
+  "ops": {
+    "input_norm": 0,
+    "qkv_projection": 1,
+    "qk_norm_rope": 2,
+    "cache_update": 3,
+    "attention": 4,
+    "attention_output_projection": 5,
+    "attention_residual_add": 6,
+    "post_attention_norm": 7,
+    "mlp": 8,
+    "mlp_residual_add": 9
+  },
+  "top_level_layer_base": 28,
+  "top_level_ops": {
+    "embed": 0,
+    "final_norm": 1,
+    "lm_head": 2,
+    "select": 3
+  }
+}
