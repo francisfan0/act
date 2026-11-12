@@ -5,16 +5,34 @@ operation. Channels carry 32-bit artifact token ids. actsim loads a C bridge
 that embeds CPython; the Python runtime computes with the pinned model's own
 modules and records what each token id points at.
 
-This repository is the implementation of `ACT_Qwen3_Implementation_Brief.md`.
-Done and validated through cached greedy decode: the pinned reference runner,
-one-layer validation, the full 28-layer prefill, and the generation controller.
-The early integer-only ABI test and toy memory harness have been removed; the
-model graph covers those checks. Not yet: two interleaved requests, and the
-replay and timing-only backends.
-
 The model is decoder-only (`Qwen3ForCausalLM`): an embedding, 28 identical
 decoder blocks with causal grouped-query self-attention, a final RMSNorm, and
 a tied LM head. There is no encoder and no cross-attention.
+
+## Setup
+
+The bridge build expects macOS with Homebrew Python 3.12 (`python3.12-config`
+at `/opt/homebrew/opt/python@3.12/bin/python3.12-config`). The first check
+compiles `build/libqwen_bridge.dylib`.
+
+```sh
+scripts/install_toolchain.sh
+```
+
+This clones `act`, `stdlib`, `annotate`, and `actsim` into `$HOME/async/src`
+and installs them under `$HOME/async`. The revisions this tree was run with
+are in `config/toolchain.json`. Check those commits out and run the script
+again to build them.
+
+```sh
+/opt/homebrew/opt/python@3.12/bin/python3.12 -m venv .venv
+.venv/bin/pip install torch==2.10.0 transformers==5.0.0 safetensors==0.7.0 numpy==1.26.4
+.venv/bin/python -c "from huggingface_hub import snapshot_download; snapshot_download('Qwen/Qwen3-0.6B', revision='c1899de289a04d12100db370d81485cdf75e47ca')"
+```
+
+Runs load that revision from the local Hugging Face cache only. They cast the
+bfloat16 checkpoint to FP32 on CPU and use eager attention. Prompts are raw
+text without the chat template, and selection is greedy.
 
 ## Layout
 
@@ -27,24 +45,6 @@ scripts/     toolchain install, bridge build, graph generator, checks
 tests/       functional-backend fault injection
 runs/        generated captures, reports, traces (gitignored)
 ```
-
-ACT sources are under `graph/` so this directory can stay the repository root.
-
-## Environment
-
-- ACT toolchain at `$HOME/async` (`act`, `stdlib`, `annotate`, `actsim`).
-  `scripts/install_toolchain.sh` reproduces it; revisions are in
-  `config/toolchain.json`. `~/.zshrc` exports `ACT_HOME` and `PATH`.
-- Python 3.12 virtualenv at `.venv`, with torch 2.10.0, transformers 5.0.0,
-  safetensors 0.7.0, and numpy 1.26.4. Conda was the intended host, but this
-  machine's conda solver cannot load `libarchive`, so the environment is a
-  `uv` virtualenv on Homebrew Python 3.12.9 instead.
-
-The model is `Qwen/Qwen3-0.6B` at revision
-`c1899de289a04d12100db370d81485cdf75e47ca`, loaded only from the local cache.
-Runs cast the bfloat16 checkpoint to FP32 on CPU and use eager attention.
-Prompts are raw text without the chat template, and selection is greedy. See
-`config/model.json` and `config/prompts.json`.
 
 The checkpoint stores `lm_head.weight` and `model.embed_tokens.weight`
 separately. They are bitwise equal, but transformers 5.0 loads them as two
@@ -168,28 +168,17 @@ transformers' module-level `eager_attention_forward`. The wrapper records
 post-RoPE Q, the cache K/V attention actually read, and the pre-`o_proj`
 output, while the pinned implementation still does the computation.
 
-## Limitations and deviations
+## Limitations
 
-- The journal records host wall time but not simulation time. External
-  functions receive only their integer arguments, and CHP has no way here to
-  pass the current simulation time. Simulation time is in `actsim.log`. A full
+- The journal records host wall time. Simulation time is in `actsim.log`. A full
   prefill is 12,480 ticks at actsim's default 10 per statement; that is not a
   hardware time.
 - All artifacts are kept for the whole run, so tensors are never reclaimed.
   Retention is about 10 to 16 MiB per 5 to 8 token prefill. Consumer counts are
-  tracked and checked at the end, which is the groundwork for reference counting.
-- `input_memory` has one slot and no byte capacity yet; `config/memory.json`
-  describes the intent.
+  tracked and checked at the end of the run.
+- `input_memory` is one slot per port. `config/memory.json` sets `byte_capacity`
+  to null.
 - A failed CHP `assert` is logged, and simulation continues. The bridge records
   every failure, and the sink's final check fails if any occurred.
-- Batch size 1, one request, short unpadded prompts. The EOS stop path is
-  implemented but has not been exercised: no test prompt has reached EOS within
-  its step limit.
-
-## Next
-
-Milestone 7 adds a second request. That needs a merge in front of the
-embedding, and a router after `select` to send each token back to its own
-controller. It then checks cache separation and per-request outputs under
-random actsim timing. Milestone 8 adds replay and timing-only backends behind
-the same graph.
+- Batch size 1, one request, short unpadded prompts. No checked prompt stops on
+  an EOS id inside its step limit.
